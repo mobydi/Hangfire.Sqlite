@@ -1,113 +1,391 @@
+// This file is part of Hangfire.
+// Copyright © 2013-2014 Sergey Odinokov.
+// 
+// Hangfire is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as 
+// published by the Free Software Foundation, either version 3 
+// of the License, or any later version.
+// 
+// Hangfire is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public 
+// License along with Hangfire. If not, see <http://www.gnu.org/licenses/>.
+
 using System;
 using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
 using System.Data.SQLite;
+using System.Linq;
+using System.Transactions;
+using Dapper;
+using Hangfire.Common;
+using Hangfire.SqlServer;
 using Hangfire.States;
 using Hangfire.Storage;
+using IsolationLevel = System.Transactions.IsolationLevel;
 
-namespace Hangfire.Sqlite
+namespace Hangfire.SQLite
 {
-    public class SqliteWriteOnlyTransaction : IWriteOnlyTransaction
+    internal class SQLiteWriteOnlyTransaction : JobStorageTransaction
     {
-        private readonly SQLiteConnection _connection;
+        //private readonly Queue<Action<System.Data.SQLite.SQLiteConnection>> _commandQueue = new Queue<Action<System.Data.SQLite.SQLiteConnection>>();
+        private readonly Queue<Action<IDbConnection>> _commandQueue = new Queue<Action<IDbConnection>>();
+        private readonly SortedSet<string> _lockedResources = new SortedSet<string>();
+        private readonly IDbConnection _connection;
+        private readonly IsolationLevel? _isolationLevel;
+        private readonly PersistentJobQueueProviderCollection _queueProviders;
 
-        public SqliteWriteOnlyTransaction(SQLiteConnection connection)
+        public SQLiteWriteOnlyTransaction(
+            IDbConnection connection,
+            IsolationLevel? isolationLevel,
+            PersistentJobQueueProviderCollection queueProviders)
         {
+            if (connection == null) throw new ArgumentNullException("connection");
+            if (queueProviders == null) throw new ArgumentNullException("queueProviders");
+
             _connection = connection;
+            _isolationLevel = isolationLevel;
+            _queueProviders = queueProviders;
         }
 
-        public void Dispose()
+        public override void Commit()
         {
-  
+            using (var transaction = CreateTransaction(_isolationLevel))
+            {
+                //_connection.EnlistTransaction(Transaction.Current); TODO
+
+                if (_lockedResources.Count > 0)
+                {
+                    _connection.Execute(
+                        "set nocount on;" +
+                        "exec sp_getapplock @Resource=@resource, @LockMode=N'Exclusive'",
+                        _lockedResources.Select(x => new { resource = x }));
+                }
+
+                foreach (var command in _commandQueue)
+                {
+                    command(_connection);
+                }
+
+                transaction.Complete();
+            }
         }
 
-        public void ExpireJob(string jobId, TimeSpan expireIn)
+        public override void ExpireJob(string jobId, TimeSpan expireIn)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"update [HangFire.Job] set ExpireAt = @expireAt where Id = @id",
+                new { expireAt = DateTime.UtcNow.Add(expireIn), id = jobId }));
         }
 
-        public void PersistJob(string jobId)
+        public override void PersistJob(string jobId)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"update [HangFire.Job] set ExpireAt = NULL where Id = @id",
+                new { id = jobId }));
         }
 
-        public void SetJobState(string jobId, IState state)
+        public override void SetJobState(string jobId, IState state)
         {
-            throw new NotImplementedException();
+            const string addStateSql = @"
+insert into [HangFire.State] (JobId, Name, Reason, CreatedAt, Data)
+values (@jobId, @name, @reason, @createdAt, @data);";
+            const string selectStateSql = @"
+select last_insert_rowid();";
+            const string setStateSql = @"
+update [HangFire.Job] set StateId = @stId, StateName = @name where Id = @id;";
+
+            QueueCommand(x =>
+            {
+                var lastId = x.ExecuteScalar<long>(addStateSql,
+                    new
+                    {
+                        jobId = jobId,
+                        name = state.Name,
+                        reason = state.Reason,
+                        createdAt = DateTime.UtcNow,
+                        data = JobHelper.ToJson(state.SerializeData())
+                    });
+
+                var stateId = x.ExecuteScalar<long>(selectStateSql);
+                System.IO.File.AppendAllText(@"d:\log.txt", stateId + " " + state.Name + "\n");
+                x.Execute(setStateSql,
+                   new
+                   {
+                       stId = stateId,
+                       name = state.Name,
+                       id = jobId
+                   });
+            });
         }
 
-        public void AddJobState(string jobId, IState state)
+        public override void AddJobState(string jobId, IState state)
         {
-            throw new NotImplementedException();
+            const string addStateSql = @"
+insert into [HangFire.State] (JobId, Name, Reason, CreatedAt, Data)
+values (@jobId, @name, @reason, @createdAt, @data)";
+
+            QueueCommand(x => x.Execute(
+                addStateSql,
+                new
+                {
+                    jobId = jobId, 
+                    name = state.Name,
+                    reason = state.Reason,
+                    createdAt = DateTime.UtcNow, 
+                    data = JobHelper.ToJson(state.SerializeData())
+                }));
         }
 
-        public void AddToQueue(string queue, string jobId)
+        public override void AddToQueue(string queue, string jobId)
         {
-            throw new NotImplementedException();
+            var provider = _queueProviders.GetProvider(queue);
+            var persistentQueue = provider.GetJobQueue(_connection);
+
+            QueueCommand(_ => persistentQueue.Enqueue(queue, jobId));
         }
 
-        public void IncrementCounter(string key)
+        public override void IncrementCounter(string key)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"insert into [HangFire.Counter] ([Key], [Value]) values (@key, @value)",
+                new { key, value = +1 }));
         }
 
-        public void IncrementCounter(string key, TimeSpan expireIn)
+        public override void IncrementCounter(string key, TimeSpan expireIn)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"insert into [HangFire.Counter] ([Key], [Value], [ExpireAt]) values (@key, @value, @expireAt)",
+                new { key, value = +1, expireAt = DateTime.UtcNow.Add(expireIn) }));
         }
 
-        public void DecrementCounter(string key)
+        public override void DecrementCounter(string key)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"insert into [HangFire.Counter] ([Key], [Value]) values (@key, @value)",
+                new { key, value = -1 }));
         }
 
-        public void DecrementCounter(string key, TimeSpan expireIn)
+        public override void DecrementCounter(string key, TimeSpan expireIn)
         {
-            throw new NotImplementedException();
+            QueueCommand(x => x.Execute(
+                @"insert into [HangFire.Counter] ([Key], [Value], [ExpireAt]) values (@key, @value, @expireAt)",
+                new { key, value = -1, expireAt = DateTime.UtcNow.Add(expireIn) }));
         }
 
-        public void AddToSet(string key, string value)
+        public override void AddToSet(string key, string value)
         {
-            throw new NotImplementedException();
+            AddToSet(key, value, 0.0);
         }
 
-        public void AddToSet(string key, string value, double score)
+        public override void AddToSet(string key, string value, double score)
         {
-            throw new NotImplementedException();
+            const string addSql = @"
+;merge [HangFire.Set] with (holdlock) as Target
+using (VALUES (@key, @value, @score)) as Source ([Key], Value, Score)
+on Target.[Key] = Source.[Key] and Target.Value = Source.Value
+when matched then update set Score = Source.Score
+when not matched then insert ([Key], Value, Score) values (Source.[Key], Source.Value, Source.Score);";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(
+                addSql,
+                new { key, value, score }));
         }
 
-        public void RemoveFromSet(string key, string value)
+        public override void RemoveFromSet(string key, string value)
         {
-            throw new NotImplementedException();
+            const string query = @"delete from [HangFire.Set] where [Key] = @key and Value = @value";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(
+                query,
+                new { key, value }));
         }
 
-        public void InsertToList(string key, string value)
+        public override void InsertToList(string key, string value)
         {
-            throw new NotImplementedException();
+            AcquireListLock();
+            QueueCommand(x => x.Execute(
+                @"insert into [HangFire.List] ([Key], Value) values (@key, @value);",
+                new { key, value }));
         }
 
-        public void RemoveFromList(string key, string value)
+        public override void RemoveFromList(string key, string value)
         {
-            throw new NotImplementedException();
+            AcquireListLock();
+            QueueCommand(x => x.Execute(
+                @"delete from [HangFire.List] where [Key] = @key and Value = @value",
+                new { key, value }));
         }
 
-        public void TrimList(string key, int keepStartingFrom, int keepEndingAt)
+        public override void TrimList(string key, int keepStartingFrom, int keepEndingAt)
         {
-            throw new NotImplementedException();
+            const string trimSql = @"
+;with cte as (
+    select row_number() over (order by Id desc) as row_num, [Key] 
+    from [HangFire.List]
+    where [Key] = @key)
+delete from cte where row_num not between @start and @end";
+
+            AcquireListLock();
+            QueueCommand(x => x.Execute(
+                trimSql,
+                new { key = key, start = keepStartingFrom + 1, end = keepEndingAt + 1 }));
         }
 
-        public void SetRangeInHash(string key, IEnumerable<KeyValuePair<string, string>> keyValuePairs)
+        public override void SetRangeInHash(string key, IEnumerable<KeyValuePair<string, string>> keyValuePairs)
         {
-            throw new NotImplementedException();
+            if (key == null) throw new ArgumentNullException("key");
+            if (keyValuePairs == null) throw new ArgumentNullException("keyValuePairs");
+
+            const string sql = @"
+;merge [HangFire.Hash] with (holdlock) as Target
+using (VALUES (@key, @field, @value)) as Source ([Key], Field, Value)
+on Target.[Key] = Source.[Key] and Target.Field = Source.Field
+when matched then update set Value = Source.Value
+when not matched then insert ([Key], Field, Value) values (Source.[Key], Source.Field, Source.Value);";
+
+            AcquireHashLock();
+            QueueCommand(x => x.Execute(
+                sql,
+                keyValuePairs.Select(y => new { key = key, field = y.Key, value = y.Value })));
         }
 
-        public void RemoveHash(string key)
+        public override void RemoveHash(string key)
         {
-            throw new NotImplementedException();
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"delete from HangFire.Hash where [Key] = @key";
+
+            AcquireHashLock();
+            QueueCommand(x => x.Execute(query, new { key }));
         }
 
-        public void Commit()
+        public override void AddRangeToSet(string key, IList<string> items)
         {
-            throw new NotImplementedException();
+            if (key == null) throw new ArgumentNullException("key");
+            if (items == null) throw new ArgumentNullException("items");
+
+            const string query = @"
+insert into [HangFire.Set] ([Key], Value, Score)
+values (@key, @value, 0.0)";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(query, items.Select(value => new { key = key, value = value }).ToList()));
+        }
+
+        public override void RemoveSet(string key)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"delete from [HangFire.Set] where [Key] = @key";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(query, new { key = key }));
+        }
+
+        public override void ExpireHash(string key, TimeSpan expireIn)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.Hash] set ExpireAt = @expireAt where [Key] = @key";
+
+            AcquireHashLock();
+            QueueCommand(x => x.Execute(query, new { key = key, expireAt = DateTime.UtcNow.Add(expireIn) }));
+        }
+
+        public override void ExpireSet(string key, TimeSpan expireIn)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.Set] set ExpireAt = @expireAt where [Key] = @key";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(query, new { key = key, expireAt = DateTime.UtcNow.Add(expireIn) }));
+        }
+
+        public override void ExpireList(string key, TimeSpan expireIn)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.List] set ExpireAt = @expireAt where [Key] = @key";
+
+            AcquireListLock();
+            QueueCommand(x => x.Execute(query, new { key = key, expireAt = DateTime.UtcNow.Add(expireIn) }));
+        }
+
+        public override void PersistHash(string key)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.Hash] set ExpireAt = null where [Key] = @key";
+
+            AcquireHashLock();
+            QueueCommand(x => x.Execute(query, new { key = key }));
+        }
+
+        public override void PersistSet(string key)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.Set] set ExpireAt = null where [Key] = @key";
+
+            AcquireSetLock();
+            QueueCommand(x => x.Execute(query, new { key = key }));
+        }
+
+        public override void PersistList(string key)
+        {
+            if (key == null) throw new ArgumentNullException("key");
+
+            const string query = @"
+update [HangFire.List] set ExpireAt = null where [Key] = @key";
+
+            AcquireListLock();
+            QueueCommand(x => x.Execute(query, new { key = key }));
+        }
+
+        internal void QueueCommand(Action<IDbConnection> action)
+        {
+            _commandQueue.Enqueue(action);
+        }
+
+        private void AcquireListLock()
+        {
+            AcquireLock(String.Format("Hangfire:List:Lock"));
+        }
+
+        private void AcquireSetLock()
+        {
+            AcquireLock(String.Format("Hangfire:Set:Lock"));
+        }
+
+        private void AcquireHashLock()
+        {
+            AcquireLock(String.Format("Hangfire:Hash:Lock"));
+        }
+
+        private void AcquireLock(string resource)
+        {
+            _lockedResources.Add(resource);
+        }
+
+        private TransactionScope CreateTransaction(IsolationLevel? isolationLevel)
+        {
+            return isolationLevel != null
+                ? new TransactionScope(TransactionScopeOption.Required,
+                    new TransactionOptions { IsolationLevel = isolationLevel.Value })
+                : new TransactionScope();
         }
     }
 }

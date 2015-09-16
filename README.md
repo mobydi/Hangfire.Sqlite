@@ -1,4 +1,4 @@
-Hangfire.PostgreSql
+Hangfire.SQLite
 ===================
 This is an plugin to the Hangfire to enable Sqlite as a storage system.
 Read about hangfire here: https://github.com/HangfireIO/Hangfire#hangfire-

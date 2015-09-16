@@ -1,76 +1,68 @@
-﻿using System;
+﻿// This file is part of Hangfire.
+// Copyright © 2013-2014 Sergey Odinokov.
+// 
+// Hangfire is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as 
+// published by the Free Software Foundation, either version 3 
+// of the License, or any later version.
+// 
+// Hangfire is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public 
+// License along with Hangfire. If not, see <http://www.gnu.org/licenses/>.
 
-namespace Hangfire.Sqlite
+using System;
+using System.Transactions;
+
+namespace Hangfire.SQLite
 {
-    public class SqliteStorageOptions
+    public class SQLiteStorageOptions
     {
-        private readonly string _clientId = null;
+        private TimeSpan _queuePollInterval;
 
-		private TimeSpan _queuePollInterval;
+        public SQLiteStorageOptions()
+        {
+            TransactionIsolationLevel = null;
+            QueuePollInterval = TimeSpan.FromSeconds(15);
+            InvisibilityTimeout = TimeSpan.FromMinutes(30);
+            JobExpirationCheckInterval = TimeSpan.FromHours(1);
+            CountersAggregateInterval = TimeSpan.FromMinutes(5);
+            PrepareSchemaIfNecessary = true;
+        }
 
-		private TimeSpan _distributedLockLifetime;
+        public IsolationLevel? TransactionIsolationLevel { get; set; }
 
-        public SqliteStorageOptions()
-		{
-			Prefix = "hangfire";
-			QueuePollInterval = TimeSpan.FromSeconds(15);
-			InvisibilityTimeout = TimeSpan.FromMinutes(30);
-			DistributedLockLifetime = TimeSpan.FromSeconds(30);
+        public TimeSpan QueuePollInterval
+        {
+            get { return _queuePollInterval; }
+            set
+            {
+                var message = String.Format(
+                    "The QueuePollInterval property value should be positive. Given: {0}.",
+                    value);
 
-			_clientId = Guid.NewGuid().ToString().Replace("-", String.Empty);
-		}
+                if (value == TimeSpan.Zero)
+                {
+                    throw new ArgumentException(message, "value");
+                }
+                if (value != value.Duration())
+                {
+                    throw new ArgumentException(message, "value");
+                }
 
-		public string Prefix { get; set; }
+                _queuePollInterval = value;
+            }
+        }
 
-		public TimeSpan QueuePollInterval
-		{
-			get { return _queuePollInterval; }
-			set
-			{
-				var message = String.Format(
-					"The QueuePollInterval property value should be positive. Given: {0}.",
-					value);
+        public TimeSpan InvisibilityTimeout { get; set; }
 
-				if (value == TimeSpan.Zero)
-				{
-					throw new ArgumentException(message, "value");
-				}
-				if (value != value.Duration())
-				{
-					throw new ArgumentException(message, "value");
-				}
+        public bool PrepareSchemaIfNecessary { get; set; }
 
-				_queuePollInterval = value;
-			}
-		}
+        public TimeSpan JobExpirationCheckInterval { get; set; }
 
-		public TimeSpan InvisibilityTimeout { get; set; }
-
-		public TimeSpan DistributedLockLifetime
-		{
-			get { return _distributedLockLifetime; }
-			set
-			{
-				var message = String.Format(
-					"The DistributedLockLifetime property value should be positive. Given: {0}.",
-					value);
-
-				if (value == TimeSpan.Zero)
-				{
-					throw new ArgumentException(message, "value");
-				}
-				if (value != value.Duration())
-				{
-					throw new ArgumentException(message, "value");
-				}
-
-				_distributedLockLifetime = value;
-			}
-		}
-
-		public string ClientId
-		{
-			get { return _clientId; }
-		}
+        public TimeSpan CountersAggregateInterval { get; set; }
     }
 }

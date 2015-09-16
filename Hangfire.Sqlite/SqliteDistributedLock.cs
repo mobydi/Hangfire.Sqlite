@@ -1,17 +1,9 @@
 using System;
 
-namespace Hangfire.Sqlite
+namespace Hangfire.SQLite
 {
-    class SqliteDistributedLock : IDisposable
+    public class SQLiteDistributedLock : IDisposable
     {
-        public SqliteDistributedLock(string resource, TimeSpan timeout)
-        {
-
-        }
-
-        public void Dispose()
-        {
-            
-        }
+        public void Dispose() { }
     }
 }
