@@ -329,16 +329,16 @@ group by StateName
 having StateName is not null;
 select count(Id) from [HangFire.Server];
 select sum(s.[Value]) from (
-    select sum([Value]) as [Value] from [HangFire.Counter] where [Key] = N'stats:succeeded'
+    select sum([Value]) as [Value] from [HangFire.Counter] where [Key] = 'stats:succeeded'
     union all
-    select [Value] from [HangFire.AggregatedCounter] where [Key] = N'stats:succeeded'
+    select [Value] from [HangFire.AggregatedCounter] where [Key] = 'stats:succeeded'
 ) as s;
 select sum(s.[Value]) from (
-    select sum([Value]) as [Value] from [HangFire.Counter] where [Key] = N'stats:deleted'
+    select sum([Value]) as [Value] from [HangFire.Counter] where [Key] = 'stats:deleted'
     union all
-    select [Value] from [HangFire.AggregatedCounter] where [Key] = N'stats:deleted'
+    select [Value] from [HangFire.AggregatedCounter] where [Key] = 'stats:deleted'
 ) as s;
-select count(*) from [HangFire.Set] where [Key] = N'recurring-jobs';
+select count(*) from [HangFire.Set] where [Key] = 'recurring-jobs';
 ";
 
                 var stats = new StatisticsDto();
@@ -346,19 +346,19 @@ select count(*) from [HangFire.Set] where [Key] = N'recurring-jobs';
                 {
                     var countByStates = multi.Read().ToDictionary(x => x.State, x => x.Count);
 
-                    Func<string, int> getCountIfExists = name => countByStates.ContainsKey(name) ? countByStates[name] : 0;
+                    Func<string, long> getCountIfExists = name => countByStates.ContainsKey(name) ? countByStates[name] : 0;
 
                     stats.Enqueued = getCountIfExists(EnqueuedState.StateName);
                     stats.Failed = getCountIfExists(FailedState.StateName);
                     stats.Processing = getCountIfExists(ProcessingState.StateName);
                     stats.Scheduled = getCountIfExists(ScheduledState.StateName);
 
-                    stats.Servers = multi.Read<int>().Single();
+                    stats.Servers = multi.Read<long?>().SingleOrDefault() ?? 0;
 
                     stats.Succeeded = multi.Read<long?>().SingleOrDefault() ?? 0;
                     stats.Deleted = multi.Read<long?>().SingleOrDefault() ?? 0;
 
-                    stats.Recurring = multi.Read<int>().Single();
+                    stats.Recurring = multi.Read<long?>().SingleOrDefault() ?? 0;
                 }
 
                 stats.Queues = _queueProviders
@@ -407,7 +407,7 @@ select count(*) from [HangFire.Set] where [Key] = N'recurring-jobs';
             IDictionary<string, DateTime> keyMaps)
         {
             const string sqlQuery = @"
-select [Key], [Value] as Count from [HangFire].[AggregatedCounter]
+select [Key], [Value] as Count from [HangFire.AggregatedCounter]
 where [Key] in @keys";
 
             var valuesMap = connection.Query(

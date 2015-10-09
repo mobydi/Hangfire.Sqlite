@@ -245,7 +245,7 @@ where j.Id = @jobId";
 			if (name == null) throw new ArgumentNullException("name");
 
 			return _connection.Query<string>(
-				@"select Value from [HangFire.JobParameter] where JobId = @jobId and Name = @name",
+                @"select Value from [HangFire.JobParameter] where JobId = @jobId and Name = @name limit 1",
 				new { jobId = jobId, name = name })
 				.SingleOrDefault();
 		}

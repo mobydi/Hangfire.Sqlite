@@ -58,13 +58,13 @@ namespace Hangfire.SQLite
             {
                 //_connection.EnlistTransaction(Transaction.Current); TODO
 
-                if (_lockedResources.Count > 0)
-                {
-                    _connection.Execute(
-                        "set nocount on;" +
-                        "exec sp_getapplock @Resource=@resource, @LockMode=N'Exclusive'",
-                        _lockedResources.Select(x => new { resource = x }));
-                }
+                //if (_lockedResources.Count > 0)
+                //{
+                //    _connection.Execute(
+                //        "set nocount on;" +
+                //        "exec sp_getapplock @Resource=@resource, @LockMode=N'Exclusive'",
+                //        _lockedResources.Select(x => new { resource = x }));
+                //}
 
                 foreach (var command in _commandQueue)
                 {
@@ -112,7 +112,7 @@ update [HangFire.Job] set StateId = @stId, StateName = @name where Id = @id;";
                     });
 
                 var stateId = x.ExecuteScalar<long>(selectStateSql);
-                System.IO.File.AppendAllText(@"d:\log.txt", stateId + " " + state.Name + "\n");
+
                 x.Execute(setStateSql,
                    new
                    {
@@ -184,12 +184,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
 
         public override void AddToSet(string key, string value, double score)
         {
-            const string addSql = @"
-;merge [HangFire.Set] with (holdlock) as Target
-using (VALUES (@key, @value, @score)) as Source ([Key], Value, Score)
-on Target.[Key] = Source.[Key] and Target.Value = Source.Value
-when matched then update set Score = Source.Score
-when not matched then insert ([Key], Value, Score) values (Source.[Key], Source.Value, Source.Score);";
+            const string addSql = @"insert or replace into [HangFire.Set] ([Key], [Value], [Score]) values (@key, @value, @score)";
 
             AcquireSetLock();
             QueueCommand(x => x.Execute(
